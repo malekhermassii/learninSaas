@@ -1,10 +1,18 @@
-const { Course, Module, Video } = require("../modeles/CourseModal");
+const {
+  Course,
+  Module,
+  Video,
+  Enrollment,
+  Progression,
+} = require("../modeles/CourseModal");
 const Professeur = require("../modeles/ProfesseurModal");
-const mongoose = require("mongoose");
+const Apprenant = require("../modeles/ApprenantModal");
 const fs = require("fs");
 const path = require("path");
 const Categorie = require("../modeles/CategorieModal");
 const transporter = require("../emailService");
+const mongoose = require("mongoose");
+//const User = require("../modeles/userModal");
 
 exports.createCourse = async (req, res) => {
   try {
@@ -52,7 +60,7 @@ exports.createCourse = async (req, res) => {
         return res.status(400).json({ message: "Aucune vidéo téléchargée." });
       }
 
-      // Création des vidéos pour ce module spécifique
+      // Création des vidéos pour ce module spécifvideosique
 
       for (let i = 0; i < moduleData.videos.length; i++) {
         const nouvelleVideo = new Video({
@@ -81,7 +89,7 @@ exports.createCourse = async (req, res) => {
       description: req.body.description,
       categorieId: req.body.categorieId,
       //professeurId: req.user._id, // Utilisation de l'ID du professeur connecté
-      image: imagePath ,
+      image: imagePath,
       modules: modulesIds,
       professeurId: req.body.professeurId,
     });
@@ -427,30 +435,207 @@ exports.refuseCourse = async (req, res) => {
   }
 };
 
-
 // Route pour rechercher les cours par nom
 exports.search = async (req, res) => {
   try {
     const { nom } = req.query; // Récupère le terme de recherche à partir de la query string
     if (!nom) {
-      return res.status(400).json({ message: 'Le nom du cours est requis' });
+      return res.status(400).json({ message: "Le nom du cours est requis" });
     }
 
     // Recherche des cours qui contiennent le terme dans leur nom
     const courses = await Course.find({
-      nom: { $regex: nom, $options: 'i' }, // Recherche insensible à la casse
+      nom: { $regex: nom, $options: "i" }, // Recherche insensible à la casse
     });
 
     if (courses.length === 0) {
-      return res.status(404).json({ message: 'Aucun cours trouvé' });
+      return res.status(404).json({ message: "Aucun cours trouvé" });
     }
 
     // Retourne les cours trouvés
     res.status(200).json(courses);
   } catch (error) {
-    console.error('Erreur lors de la recherche des cours:', error);
-    res.status(500).json({ message: 'Erreur serveur lors de la recherche', error: error.message });
+    console.error("Erreur lors de la recherche des cours:", error);
+    res.status(500).json({
+      message: "Erreur serveur lors de la recherche",
+      error: error.message,
+    });
   }
 };
 
+// Route pour inscrire un user à un cours
+exports.enroll = async (req, res) => {
+  try {
+    const { apprenantId, courseId } = req.params;
+
+    // Vérifier si l'apprenant existe
+    const apprenant = await Apprenant.findById(apprenantId);
+    if (!apprenant) {
+      return res.status(404).json({ message: "Apprenant non trouvé." });
+    }
+    // Vérifier si le cours existe
+    const course = await Course.findById(courseId);
+    if (!course) {
+      return res.status(404).json({ message: "Cours non trouvé." });
+    }
+    // Vérifier si l'apprenant est déjà inscrit
+    const existingEnrollment = await Enrollment.findOne({
+      apprenantId,
+      courseId,
+    });
+    if (existingEnrollment) {
+      return res
+        .status(400)
+        .json({ message: "L'apprenant est déjà inscrit à ce cours." });
+    }
+
+    // Ajouter l'inscription
+    const enrollment = new Enrollment({ apprenantId, courseId });
+    await enrollment.save();
+
+    // Mettre à jour la liste des étudiants inscrits dans Course
+    course.apprenantEnroll.push(apprenantId);
+    course.enrolledCount = course.apprenantEnroll.length; // Met à jour le nombre d'inscrits
+    await course.save();
+
+    res.status(201).json({
+      message: "Inscription réussie !",
+      enrolledCount: course.enrolledCount,
+    });
+  } catch (error) {
+    console.error("Erreur lors de l'inscription :", error); // Affichage de l'erreur dans la console
+    res.status(500).json({
+      message: "Erreur serveur",
+      error: error.message || error,
+    });
+  }
+};
+
+exports.updateProgress = async (req, res) => {
+  try {
+    const { courseId, moduleId, videoId, apprenantId } = req.params;
+
+    // Vérification de la validité des ObjectId
+    if (
+      !mongoose.Types.ObjectId.isValid(courseId) ||
+      !mongoose.Types.ObjectId.isValid(moduleId) ||
+      !mongoose.Types.ObjectId.isValid(videoId) ||
+      !mongoose.Types.ObjectId.isValid(apprenantId)
+    ) {
+      return res.status(400).json({ message: "ID invalide fourni" });
+    }
+
+    // Vérifier si le cours existe et récupérer ses modules
+    const course = await Course.findById(courseId).populate("modules");
+    if (!course) {
+      return res.status(404).json({ message: "Cours non trouvé" });
+    }
+
+    // Vérifier si le module appartient bien au cours
+    const module = course.modules.find((mod) => mod._id.equals(moduleId));
+    if (!module) {
+      return res.status(400).json({ message: "Module invalide pour ce cours" });
+    }
+
+    // Récupérer le module avec ses vidéos
+    const moduleDetails = await Module.findById(moduleId).populate("videos");
+    if (!moduleDetails || !moduleDetails.videos) {
+      return res
+        .status(400)
+        .json({ message: "Module introuvable ou sans vidéos" });
+    }
+
+    // Vérifier si la vidéo appartient bien au module
+    if (!moduleDetails.videos.some((v) => v._id.equals(videoId))) {
+      return res.status(400).json({ message: "Vidéo invalide pour ce module" });
+    }
+
+    // Vérification de la progression de l'apprenant pour ce cours
+    let progression = await Progression.findOne({ apprenantId, courseId });
+
+    if (!progression) {
+      progression = new Progression({
+        apprenantId,
+        courseId,
+        modules: [],
+        complet: false,
+      });
+    }
+
+    // Vérification de la progression pour ce module
+    let moduleProgress = progression.modules.find((m) =>
+      m.moduleId.equals(moduleId)
+    );
+
+    if (!moduleProgress) {
+      moduleProgress = {
+        moduleId,
+        videosCompletees: [],
+        progressionModule: 0,
+      };
+      progression.modules.push(moduleProgress);
+    }
+
+    // Ajout de la vidéo aux vidéos complétées si elle n'y est pas déjà
+    if (!moduleProgress.videosCompletees.some((v) => v.equals(videoId))) {
+      moduleProgress.videosCompletees.push(videoId);
+    }
+
+    // Calcul de la progression du module
+    const totalVideos = moduleDetails.videos.length;
+    moduleProgress.progressionModule =
+      totalVideos > 0
+        ? Math.round(
+            (moduleProgress.videosCompletees.length / totalVideos) * 100
+          )
+        : 0;
+
+    // Calcul de la progression globale du cours
+    const totalModules = course.modules.length;
+    const completedModules = progression.modules.filter(
+      (m) => m.videosCompletees.length === moduleDetails.videos.length
+    ).length;
+
+    progression.progressionCours =
+      totalModules > 0
+        ? Math.round((completedModules / totalModules) * 100)
+        : 0;
+
+    // Vérification si tous les modules sont complétés
+    progression.complet = completedModules === totalModules;
+
+    // Sauvegarde de la progression
+    await progression.save();
+
+    // Réponse avec la progression calculée
+    res.json({
+      message: "Progression mise à jour avec succès",
+      progressionCours: progression.progressionCours,
+    });
+  } catch (error) {
+    console.error("Erreur lors de la mise à jour de la progression:", error);
+    res
+      .status(500)
+      .json({ message: "Une erreur s'est produite", error: error.message });
+  }
+};
+
+//pour afficher la progression de chaque cours
+exports.getProgression= async (req, res) => {
+  try {
+    const { userId } = req.user; // Récupère l'ID de l'apprenant du token
+
+    // Récupère les progressions de l'apprenant
+    const progressions = await Progression.find({ apprenantId: userId }).populate("courseId");
+
+    if (!progressions || progressions.length === 0) {
+      return res.status(404).json({ message: "Aucune progression trouvée pour cet apprenant." });
+    }
+
+    res.json(progressions); // Retourne les progressions
+  } catch (error) {
+    console.error("Erreur lors de la récupération de la progression:", error);
+    res.status(500).json({ message: 'Erreur serveur', error: error.message });
+  }
+};
 
