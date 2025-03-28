@@ -91,6 +91,8 @@ exports.createCourse = async (req, res) => {
       //professeurId: req.user._id, // Utilisation de l'ID du professeur connecté
       image: imagePath,
       modules: modulesIds,
+      level:req.body.level,
+      languages:req.body.languages,
       professeurId: req.body.professeurId,
     });
     // Sauvegarde du cours
@@ -178,6 +180,14 @@ exports.updateCourse = async (req, res) => {
     if (req.body.description !== undefined) {
       coursExistant.description = req.body.description;
     }
+     // Mise à jour conditionnelle de la description
+     if (req.body.level !== undefined) {
+      coursExistant.level = req.body.level;
+    }
+    if (req.body.languages !== undefined) {
+      coursExistant.languages = req.body.languages;
+    }
+
 
     // Mise à jour de la catégorie si fournie et valide
     if (req.body.categorieId) {

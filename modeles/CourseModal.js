@@ -14,7 +14,9 @@ const CoursSchema = new mongoose.Schema({
   question_id: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Question' }],
   feedback_id: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Feedback' }],
   professeurId: { type: mongoose.Schema.Types.ObjectId, ref: 'Professeur' },
-  enrolledCount :{type:Number,default: 0}
+  enrolledCount :{type:Number,default: 0},
+  level:{ type: String},
+  languages:{ type: String}
 });
 //enrollschema
 const EnrollmentSchema = new mongoose.Schema({
