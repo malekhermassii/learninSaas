@@ -1,10 +1,10 @@
-const express = require("express");
+dotenv.config(); // Charger les variables d'environnement
+
 const Stripe = require("stripe");
 const dotenv = require("dotenv");
 const { Plan } = require("./modeles/AbonnementModal");
 
-dotenv.config(); // Charger les variables d'environnement
-const router = express.Router();
+// const router = express.Router();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -44,17 +44,16 @@ router.post('/create-checkout-session', async (req, res) => {
   res.json({ id: session.id });
 });
 
-module.exports = router;
-
 // 🟢 2. Route pour récupérer une session de paiement
 router.get("/session/:session_id", async (req, res) => {
   try {
     const session = await stripe.checkout.sessions.retrieve(req.params.session_id);
+    console.log(session)
     res.json(session);
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
-  console.log(session)
 });
 
 

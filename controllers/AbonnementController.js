@@ -1,5 +1,6 @@
 const { Abonnement, Plan, Payment } = require("../modeles/AbonnementModal");
 const Apprenant = require("../modeles/ApprenantModal");
+const User = require("../modeles/userModal");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 exports.createPlan = async (req, res) => {
@@ -120,46 +121,63 @@ exports.findOneplan = (req, res) => {
 
 // Créer une session de paiement Stripe
 exports.createCheckoutSession = async (req, res) => {
-  const { planId, apprenantId } = req.body;
+  try {
+    const { planId, userId } = req.body;
 
-  // Récupérer le plan depuis la base de données
-  const plan = await Plan.findById(planId);
-  if (!plan) {
-    return res.status(404).json({ error: "Plan non trouvé" });
-  }
+    // Récupérer le plan depuis la base de données
+    const plan = await Plan.findById(planId);
+    if (!plan) {
+      return res.status(404).json({ error: "Plan non trouvé" });
+    }
 
-  // Créer une session de paiement Stripe
-  const session = await stripe.checkout.sessions.create({
-    payment_method_types: ["card"],
-    line_items: [
-      {
-        price_data: {
-          currency: "usd",
-          product_data: {
-            name: plan.name,
+    // Round the price to avoid floating point errors and ensure it's an integer
+    const unitAmount = Math.round(plan.price * 100); // Amount in cents
+
+    // Créer une session de paiement Stripe
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: plan.name,
+            },
+            unit_amount: unitAmount, // The amount in cents (rounded)
           },
-          unit_amount: plan.price * 100, // Le montant est en cents
+          quantity: 1,
         },
-        quantity: 1,
+      ],
+      mode: "payment",
+      success_url:
+        `http://localhost:3000/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: "http://localhost:3000/cancel",
+      metadata: {
+        planId: plan._id.toString(),
+        userId: userId.toString(),
       },
-    ],
-    mode: "payment",
-    success_url:
-      "https://votre_domaine/success?session_id={CHECKOUT_SESSION_ID}",
-    cancel_url: "https://votre_domaine/cancel",
-    metadata: {
-      planId: plan._id.toString(),
-      apprenantId: apprenantId,
-    },
-  });
+    });
 
-  res.json({ id: session.id });
+    res.json({ id: session.id });
+  }
+  catch (error) {
+    res.status(500).json({ error: error.message });
+  } 
 };
+
 
 //Gère les événements Stripe pour les paiements et les abonnements.
 exports.handleWebhook = async (req, res) => {
-  let event = req.body; // Pas besoin de JSON.parse() ici
-
+  // let event = req.body; // Pas besoin de JSON.parse() ici
+  const sig = req.headers["stripe-signature"];
+  let event;
+  try {
+    // we use stripe.webhooks.constructEvent to ensures the request is genuinely from Stripe
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error("Webhook signature verification failed.", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
   console.log("Webhook reçu !");
   console.log("Headers:", req.headers);
   console.log("Body:", event); // Affiche l'objet JSON directement
@@ -186,36 +204,146 @@ exports.handleWebhook = async (req, res) => {
   res.json({ received: true });
 };
 
+// async function handleSubscriptionCreation(session) {
+//   try {
+//     // const apprenant_id = session.metadata.apprenantId;
+//     const userId = session.metadata.userId;
+//     const planId = session.metadata.planId;
+//     const user = await User.findById(userId);
+//     const planExists = await Plan.exists({ _id: planId });
+
+//     if (!user || !planExists) {
+//       throw new Error("Invalid userId or planId");
+//     }
+
+//     const abonnement = new Abonnement({
+//       userId: user._id,
+//       planId: planId,
+//       stripeSubscriptionId: session.subscription.id,
+//       statut: session.subscription.status || "actif",
+//       dateDebut: new Date(), // Add timestamp
+//     });
+
+//     await abonnement.save();
+//     // Créer un profil d'apprenant et associer l'abonnement
+//       const newApprenant = new Apprenant({
+//         userId: user._id,
+//         abonnement_id: abonnement._id, // Associez l'ID de l'abonnement
+//       });
+    
+//       await newApprenant.save();
+//       abonnement.apprenant_id = newApprenant._id;
+//       await abonnement.save();
+    
+//       await User.findByIdAndUpdate(userId, { apprenantId: newApprenant._id });
+    
+//       console.log("✅ Apprenant et abonnement créés avec succès.");
+//   } catch (error) {
+//     console.error("❌ Subscription creation failed:", error.message);
+//   }
+// }
 async function handleSubscriptionCreation(session) {
-  const apprenant_id = session.client_reference_id;
-  const planId = session.metadata.planId;
+  const mongooseSession = await mongoose.startSession();
+  mongooseSession.startTransaction();
 
-  const abonnement = new Abonnement({
-    apprenant_id: apprenant_id,
-    planId: planId,
-    stripeSubscriptionId: session.subscription,
-    statut: "actif",
-  });
+  try {
+    const userId = session.metadata.userId;
+    const planId = session.metadata.planId;
 
-  await abonnement.save();
-}
-
-async function handlePaymentSuccess(invoice) {
-  const subscriptionId = invoice.subscription;
-  const amount = invoice.amount_paid / 100;
-
-  await Abonnement.updateOne(
-    { stripeSubscriptionId: subscriptionId },
-    {
-      $push: {
-        payments: {
-          date: new Date(),
-          amount,
-          invoiceId: invoice.id,
-        },
-      },
+    // Validate inputs
+    if (!userId || !planId) {
+      throw new Error("Missing userId or planId in metadata");
     }
-  );
+
+    // Get data with session
+    const [user, plan] = await Promise.all([
+      User.findById(userId).session(mongooseSession),
+      Plan.findById(planId).session(mongooseSession)
+    ]);
+
+    if (!user || !plan) {
+      throw new Error("Invalid userId or planId");
+    }
+
+    if (user.apprenantId) {
+      throw new Error("User already has an Apprenant profile");
+    }
+
+    // Create subscription
+    const abonnement = new Abonnement({
+      userId: user._id,
+      planId: planId,
+      stripeSubscriptionId: session.subscription.id,
+      statut: session.subscription.status || "actif",
+      dateDebut: new Date(session.subscription.current_period_start * 1000),
+    });
+
+    await abonnement.save({ session: mongooseSession });
+
+    // Create Apprenant
+    const newApprenant = new Apprenant({
+      userId: user._id,
+      abonnement_id: abonnement._id,
+    });
+
+    await newApprenant.save({ session: mongooseSession });
+
+    // Update relationships
+    abonnement.apprenant_id = newApprenant._id;
+    await abonnement.save({ session: mongooseSession });
+
+    user.apprenantId = newApprenant._id;
+    await user.save({ session: mongooseSession });
+
+    await mongooseSession.commitTransaction();
+    console.log("✅ Apprenant et abonnement créés avec succès.");
+  } catch (error) {
+    await mongooseSession.abortTransaction();
+    console.error("❌ Subscription creation failed:", error.message);
+    // Re-throw for upstream handling
+    throw error;
+  } finally {
+    mongooseSession.endSession();
+  }
+}
+async function handlePaymentSuccess(invoice) {
+  try {
+    const subscriptionId = invoice.subscription;
+    const amount = invoice.amount_paid / 100;
+
+    // 1. Update Abonnement
+    await Abonnement.updateOne(
+      { stripeSubscriptionId: subscriptionId },
+      {
+        $push: {
+          payments: {
+            date: new Date(),
+            amount,
+            invoiceId: invoice.id,
+          },
+        },
+      }
+    );
+
+    // 2. Create Payment document
+    const abonnement = await Abonnement.findOne({
+      stripeSubscriptionId: subscriptionId,
+    });
+
+    if (abonnement) {
+      const payment = new Payment({
+        abonnement_id: abonnement._id,
+        montant: amount,
+        methodePaiement: "card", // From Stripe data
+        statut: "paid",
+      });
+
+      await payment.save();
+      console.log("✅ Payment saved:", payment);
+    }
+  } catch (error) {
+    console.error("❌ Payment handling failed:", error.message);
+  }
 }
 
 async function handleSubscriptionCancellation(subscription) {
@@ -236,7 +364,13 @@ exports.getSubscriptions = async (req, res) => {
 
     const abonnements = await Abonnement.find(filter)
       .populate("planId", "name price")
-      .populate("apprenant_id", "nom email")
+      .populate({
+        path: 'apprenant_id',  // Peupler le champ 'apprenant_id' avec les informations de l'apprenant
+        populate: {
+          path: 'userId',  // Peupler le champ 'userId' de l'apprenant pour récupérer les informations de l'utilisateur
+          select: 'name email'  // Inclure le nom et l'email de l'utilisateur de l'apprenant
+        }
+      })
       .sort({ dateDebut: -1 });
 
     res.json(abonnements);
@@ -245,7 +379,6 @@ exports.getSubscriptions = async (req, res) => {
   }
 };
 
-// Historique des paiements (Admin)
 exports.getPaymentHistory = async (req, res) => {
   try {
     const paiements = await Payment.find()
@@ -253,7 +386,11 @@ exports.getPaymentHistory = async (req, res) => {
         path: "abonnement_id",
         populate: [
           { path: "planId", select: "name" },
-          { path: "apprenant_id", select: "nom email" },
+          {path: 'apprenant_id',  
+            populate: {
+              path: 'userId',  
+              select: 'name email' 
+            } },
         ],
       })
       .sort({ createdAt: -1 });
