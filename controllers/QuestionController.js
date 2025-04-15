@@ -2,7 +2,7 @@ const Question = require("../modeles/QuestionModal");
 const { Course, Video } = require("../modeles/CourseModal");
 exports.createQuestion = async (req, res) => {
   try {
-    const { courseId } = req.params;
+    const { courseId } = req.params; 
     // Création de la question
     const qst = new Question({
       question: req.body.question,

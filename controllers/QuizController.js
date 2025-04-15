@@ -288,6 +288,9 @@ exports.passerQuiz = async (req, res) => {
           date_obtention: new Date(),
         });
         await certificat.save();
+        await Apprenant.findByIdAndUpdate(req.body.apprenant_id, {
+          $push: { certificat_id: certificat._id },
+        });
       }
       return res.status(200).json({
         message:
